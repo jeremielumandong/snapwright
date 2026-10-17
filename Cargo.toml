@@ -66,6 +66,8 @@ global-hotkey = "0.8"
 # Linux clipboard images: GPUI's X11 clipboard writes text only. On Wayland arboard uses the
 # data-control protocol (wlroots compositors, KDE).
 arboard = { version = "3.6", default-features = false, features = ["image-data", "wayland-data-control"] }
+# Windows clipboard images as a bitmap too: GPUI writes the registered "PNG" format only.
+clipboard-win = "5.4"
 
 # Linux
 x11rb = { version = "0.14", features = ["randr", "shm", "xfixes"] }

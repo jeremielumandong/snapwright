@@ -22,7 +22,10 @@ pub fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>> {
 }
 
 /// Decodes a PNG to 8-bit RGBA: `(width, height, pixels)`.
-#[cfg_attr(not(any(target_os = "linux", test)), allow(dead_code))]
+#[cfg_attr(
+    not(any(target_os = "linux", target_os = "windows", test)),
+    allow(dead_code)
+)]
 pub fn decode_png(png: &[u8]) -> Result<(u32, u32, Vec<u8>)> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(png));
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
@@ -162,6 +165,70 @@ impl LinuxClipboard {
     }
 }
 
+/// A `CF_DIBV5` clipboard bitmap of RGBA pixels: a `BITMAPV5HEADER`, then BGRA rows bottom
+/// up (Word and WordPad cannot paste a top-down DIB with a negative height).
+#[cfg(any(target_os = "windows", test))]
+pub fn dib_v5(width: u32, height: u32, rgba: &[u8]) -> Vec<u8> {
+    const HEADER: u32 = 124;
+    const BI_BITFIELDS: u32 = 3;
+    const LCS_SRGB: u32 = 0x7352_4742;
+    const LCS_GM_IMAGES: u32 = 4;
+    let row = width as usize * 4;
+    let mut out = Vec::with_capacity(HEADER as usize + rgba.len());
+    for v in [HEADER, width, height] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&1u16.to_le_bytes()); // planes
+    out.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+    for v in [
+        BI_BITFIELDS,
+        width * height * 4,
+        0, // x pixels per metre
+        0, // y pixels per metre
+        0, // colours used
+        0, // colours important
+        0x00ff_0000,
+        0x0000_ff00,
+        0x0000_00ff,
+        0xff00_0000,
+        LCS_SRGB,
+    ] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&[0; 36 + 12]); // endpoints and gamma, unused with sRGB
+    for v in [LCS_GM_IMAGES, 0, 0, 0] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    for line in rgba.chunks_exact(row).rev() {
+        out.extend(
+            line.as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|&[r, g, b, a]| [b, g, r, a]),
+        );
+    }
+    out
+}
+
+/// Puts an image on the Windows clipboard as both a `CF_DIBV5` bitmap and the registered
+/// "PNG" format. GPUI writes the PNG format only, which Paint, Office and Win+V history
+/// cannot paste; they read bitmaps. Call it off the UI thread.
+#[cfg(target_os = "windows")]
+pub fn set_windows_image(width: u32, height: u32, rgba: &[u8], png: &[u8]) -> Result<()> {
+    use clipboard_win::{Clipboard, formats, raw};
+    let dib = dib_v5(width, height, rgba);
+    let _open =
+        Clipboard::new_attempts(10).map_err(|e| anyhow::anyhow!("opening the clipboard: {e}"))?;
+    raw::empty().map_err(|e| anyhow::anyhow!("emptying the clipboard: {e}"))?;
+    raw::set_without_clear(formats::CF_DIBV5, &dib)
+        .map_err(|e| anyhow::anyhow!("writing the bitmap: {e}"))?;
+    if let Some(format) = raw::register_format("PNG") {
+        raw::set_without_clear(format.get(), png)
+            .map_err(|e| anyhow::anyhow!("writing the PNG: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
@@ -172,5 +239,21 @@ mod tests {
         let rgba: Vec<u8> = (0..6 * 4).map(|i| i as u8 * 10).collect();
         let png = encode_png(3, 2, &rgba).unwrap();
         assert_eq!(decode_png(&png).unwrap(), (3, 2, rgba));
+    }
+
+    #[test]
+    fn dib_is_bottom_up_bgra_after_a_v5_header() {
+        // 1x2: a red pixel above a blue one.
+        let rgba = [255, 0, 0, 255, 0, 0, 255, 255];
+        let dib = dib_v5(1, 2, &rgba);
+        let u32_at = |i: usize| u32::from_le_bytes(dib[i..i + 4].try_into().unwrap());
+        assert_eq!(dib.len(), 124 + 8);
+        assert_eq!((u32_at(0), u32_at(4), u32_at(8)), (124, 1, 2));
+        assert_eq!(u32_at(16), 3); // BI_BITFIELDS
+        assert_eq!(u32_at(20), 8);
+        assert_eq!(u32_at(40), 0x00ff_0000); // red mask
+        assert_eq!(u32_at(56), 0x7352_4742); // sRGB
+        assert_eq!(u32_at(108), 4); // LCS_GM_IMAGES
+        assert_eq!(&dib[124..], &[255, 0, 0, 255, 0, 0, 255, 255][..]);
     }
 }

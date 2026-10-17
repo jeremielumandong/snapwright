@@ -6597,6 +6597,7 @@ dependencies = [
  "anyhow",
  "arboard",
  "chrono",
+ "clipboard-win",
  "directories",
  "futures",
  "global-hotkey",

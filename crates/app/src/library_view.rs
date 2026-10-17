@@ -41,6 +41,8 @@ const THUMB_H: f32 = 124.;
 const HEADER_H: f32 = 52.;
 /// Delay for the capture menu's "Capture in 3 seconds".
 const DELAY_SECS: u32 = 3;
+/// How long the Copy button reads "Copied".
+const COPIED_FOR: std::time::Duration = std::time::Duration::from_millis(1500);
 
 /// Bumped whenever the library changes outside this window (a new capture), so an open
 /// library window reloads.
@@ -200,6 +202,8 @@ pub struct LibraryView {
     scroll_to: Option<usize>,
     /// Clear the search box on the next render (which then reloads).
     search_reset: bool,
+    /// The capture just put on the clipboard, shown as "Copied" on its Copy button for a moment.
+    copied: Option<i64>,
     _subs: Vec<Subscription>,
 }
 
@@ -276,6 +280,7 @@ impl LibraryView {
             list: ListState::new(0, ListAlignment::Top, px(400.)),
             scroll_to: None,
             search_reset: false,
+            copied: None,
             _subs: subs,
         };
         view.reload(cx);
@@ -444,9 +449,30 @@ impl LibraryView {
     }
 
     fn copy_selected(&mut self, cx: &mut Context<Self>) {
-        if let Some(item) = self.selected_item() {
-            session::copy_file_to_clipboard(item.image.clone(), cx);
-        }
+        let Some(item) = self.selected_item() else {
+            return;
+        };
+        let id = item.capture.id;
+        let copy = session::copy_file_to_clipboard(item.image.clone(), cx);
+        cx.spawn(async move |this, cx| {
+            if let Err(e) = copy.await {
+                tracing::error!(error = %e, "copying the capture failed");
+                return;
+            }
+            tracing::info!(id, "capture copied");
+            let _ = this.update(cx, |this, cx| {
+                this.copied = Some(id);
+                cx.notify();
+            });
+            cx.background_executor().timer(COPIED_FOR).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.copied == Some(id) {
+                    this.copied = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     fn trash_or_restore(&mut self, cx: &mut Context<Self>) {
@@ -1114,8 +1140,13 @@ impl LibraryView {
                 Button::new("copy")
                     .primary()
                     .flex_1()
-                    .icon(Icon::new(IconName::Copy))
-                    .label("Copy")
+                    .map(|b| {
+                        if self.copied == Some(c.id) {
+                            b.icon(Icon::new(IconName::Check)).label("Copied")
+                        } else {
+                            b.icon(Icon::new(IconName::Copy)).label("Copy")
+                        }
+                    })
                     .on_click(cx.listener(|this, _, _, cx| this.copy_selected(cx))),
             )
             .child(if c.video.is_some() {
