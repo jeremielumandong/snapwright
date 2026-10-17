@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use gpui_kit::{
-    AnyWindowHandle, App, AppContext as _, Bounds, Global, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowKind, WindowOptions, point, px, size,
+    AnyWindowHandle, App, AppContext as _, Bounds, Global, Task, Window,
+    WindowBackgroundAppearance, WindowBounds, WindowKind, WindowOptions, point, px, size,
 };
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 use gpui_kit::{ClipboardItem, Image, ImageFormat};
 use snapwright_capture::{Capturer, Display, Frame, Rect, WindowInfo};
 use snapwright_library::{Library, Metadata, NewCapture, Source};
@@ -542,6 +542,8 @@ fn keep(frame: Frame, meta: Metadata, pressed_at: Instant, cx: &mut App) {
         let png = output::encode_png(frame.width, frame.height, &rgba)?;
         #[cfg(target_os = "linux")]
         clipboard.set_image(frame.width, frame.height, rgba.clone())?;
+        #[cfg(target_os = "windows")]
+        output::set_windows_image(frame.width, frame.height, &rgba, &png)?;
         anyhow::Ok((png, rgba))
     });
     cx.spawn(async move |cx| {
@@ -552,7 +554,7 @@ fn keep(frame: Frame, meta: Metadata, pressed_at: Instant, cx: &mut App) {
                 return;
             }
         };
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "macos")]
         cx.update(|cx| {
             cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
                 ImageFormat::Png,
@@ -606,7 +608,8 @@ fn keep(frame: Frame, meta: Metadata, pressed_at: Instant, cx: &mut App) {
 }
 
 /// Puts an image already encoded as `png` (from these RGBA pixels) on the clipboard. Call it
-/// on the UI thread; on Linux the clipboard write itself is handed to a background thread.
+/// on the UI thread; on Linux and Windows the clipboard write itself is handed to a
+/// background thread.
 pub fn copy_image(width: u32, height: u32, rgba: Vec<u8>, png: Vec<u8>, cx: &mut App) {
     #[cfg(target_os = "linux")]
     {
@@ -620,7 +623,15 @@ pub fn copy_image(width: u32, height: u32, rgba: Vec<u8>, png: Vec<u8>, cx: &mut
             })
             .detach();
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "windows")]
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = output::set_windows_image(width, height, &rgba, &png) {
+                tracing::error!(error = %e, "copying the image failed");
+            }
+        })
+        .detach();
+    #[cfg(target_os = "macos")]
     {
         let _ = (width, height, rgba);
         cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
@@ -630,8 +641,9 @@ pub fn copy_image(width: u32, height: u32, rgba: Vec<u8>, png: Vec<u8>, cx: &mut
     }
 }
 
-/// Puts a PNG file on the clipboard, reading (and on Linux decoding) it off the UI thread.
-pub fn copy_file_to_clipboard(path: std::path::PathBuf, cx: &mut App) {
+/// Puts a PNG file on the clipboard, reading (and on Linux and Windows decoding) it off the
+/// UI thread. The task finishes once the image is on the clipboard.
+pub fn copy_file_to_clipboard(path: std::path::PathBuf, cx: &mut App) -> Task<anyhow::Result<()>> {
     #[cfg(target_os = "linux")]
     let clipboard = cx.global::<Clipboard>().0.clone();
     let read = cx.background_executor().spawn(async move {
@@ -641,26 +653,26 @@ pub fn copy_file_to_clipboard(path: std::path::PathBuf, cx: &mut App) {
             let (width, height, rgba) = output::decode_png(&png)?;
             clipboard.set_image(width, height, rgba)?;
         }
+        #[cfg(target_os = "windows")]
+        {
+            let (width, height, rgba) = output::decode_png(&png)?;
+            output::set_windows_image(width, height, &rgba, &png)?;
+        }
         anyhow::Ok(png)
     });
     cx.spawn(async move |cx| {
-        let result = read.await;
-        #[cfg(target_os = "linux")]
-        let _ = cx;
-        match result {
-            #[cfg(not(target_os = "linux"))]
-            Ok(png) => cx.update(|cx| {
-                cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
-                    ImageFormat::Png,
-                    png,
-                )));
-            }),
-            #[cfg(target_os = "linux")]
-            Ok(_) => {}
-            Err(e) => tracing::error!(error = %e, "copying the capture failed"),
-        }
+        let png = read.await?;
+        #[cfg(target_os = "macos")]
+        cx.update(|cx| {
+            cx.write_to_clipboard(ClipboardItem::new_image(&Image::from_bytes(
+                ImageFormat::Png,
+                png,
+            )));
+        });
+        #[cfg(not(target_os = "macos"))]
+        let _ = (png, cx);
+        Ok(())
     })
-    .detach();
 }
 
 #[cfg(test)]

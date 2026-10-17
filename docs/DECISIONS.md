@@ -40,7 +40,7 @@ for it. Later overlays then show in 66 to 112 ms on the same software renderer.
 
 GPUI's X11 clipboard writes text only. On Linux the app puts captures on the clipboard with
 `arboard` (MIT/Apache-2.0), kept alive for the app's life because on X11 the owner serves
-every paste. macOS and Windows use GPUI's clipboard, which supports PNG.
+every paste. macOS uses GPUI's clipboard, which supports PNG. (Windows: see 2026-10-17.)
 
 ## 2026-10-12: Tray icon through `tray-icon` with the `ksni` backend
 
@@ -347,3 +347,14 @@ From the "Omarchy theme implementation" design handoff.
 - The app now starts with `Application::new_inaccessible` on macOS, so the adapter is
   never attached. GPUI windows lose VoiceOver support until gpui-fast picks up the upstream
   fix; switch back to `gpui_kit::application()` then.
+
+## 2026-10-17: Windows clipboard images as a bitmap and PNG
+
+- GPUI's Windows clipboard writes images in the registered "PNG" format only. Browsers read
+  that, but Paint, Office and Win+V clipboard history read bitmaps, so a copied capture
+  looked like it never reached the clipboard (reported from the library's Copy button).
+- The app now writes the clipboard itself on Windows with `clipboard-win` (MIT, already in
+  the tree through `arboard`): a bottom-up `CF_DIBV5` built from the RGBA pixels
+  (`output::dib_v5`; Windows synthesises `CF_DIB` and `CF_BITMAP` from it) and the same PNG
+  bytes as before, off the UI thread. A top-down DIB is avoided because Word cannot paste
+  one. macOS keeps GPUI's `public.png` write.
