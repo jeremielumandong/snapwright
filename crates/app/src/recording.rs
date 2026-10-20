@@ -35,28 +35,59 @@ const HUD_H: f32 = 44.;
 const GAP: f32 = 12.;
 const EDGE: f32 = 8.;
 
-/// How videos are recorded. GIFs keep their own frame rate and have no sound.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Prefs {
-    pub fps: u32,
-    pub quality: Quality,
-    pub audio: Audio,
+/// A video's frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FrameRate {
+    /// The recorded display's refresh rate (60 if the OS does not say).
+    #[default]
+    Display,
+    Fixed(u32),
 }
 
-impl Default for Prefs {
-    fn default() -> Self {
-        Self {
-            fps: Format::Mp4.default_fps(),
-            quality: Quality::default(),
-            audio: Audio::default(),
+impl FrameRate {
+    /// The frame rate for recording `display`.
+    pub fn for_display(self, display: &Display) -> u32 {
+        match self {
+            Self::Display => snapwright_record::display_fps(display),
+            Self::Fixed(fps) => fps.clamp(1, snapwright_record::MAX_FPS),
         }
     }
+
+    /// The value in `settings.toml`: `display` or a number.
+    pub fn key(self) -> String {
+        match self {
+            Self::Display => "display".into(),
+            Self::Fixed(fps) => fps.to_string(),
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        if key.eq_ignore_ascii_case("display") {
+            return Some(Self::Display);
+        }
+        key.parse()
+            .ok()
+            .filter(|fps| (1..=snapwright_record::MAX_FPS).contains(fps))
+            .map(Self::Fixed)
+    }
+}
+
+/// How videos are recorded. GIFs keep their own frame rate and have no sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Prefs {
+    pub fps: FrameRate,
+    pub quality: Quality,
+    pub audio: Audio,
 }
 
 impl Global for Prefs {}
 
 /// The frame rates the tray offers.
-pub const FPS_CHOICES: [u32; 2] = [60, 30];
+pub const FPS_CHOICES: [FrameRate; 3] = [
+    FrameRate::Display,
+    FrameRate::Fixed(60),
+    FrameRate::Fixed(30),
+];
 
 /// Sets the saved recording options at launch.
 pub fn init(prefs: Prefs, cx: &mut App) {
@@ -75,7 +106,7 @@ pub fn choose(choice: crate::tray::RecordingChoice, cx: &mut App) {
     match choice {
         RecordingChoice::SystemAudio => p.audio.system = !p.audio.system,
         RecordingChoice::Microphone => p.audio.microphone = !p.audio.microphone,
-        RecordingChoice::Fps(fps) => p.fps = fps.clamp(1, 60),
+        RecordingChoice::Fps(fps) => p.fps = fps,
         RecordingChoice::Quality(q) => p.quality = q,
     }
     cx.set_global(p);
@@ -92,11 +123,11 @@ pub fn choose(choice: crate::tray::RecordingChoice, cx: &mut App) {
         .detach();
 }
 
-/// Recorder options for `format` with these preferences.
-fn options(format: Format, prefs: Prefs) -> Options {
+/// Recorder options for recording `display` to `format` with these preferences.
+fn options(format: Format, prefs: Prefs, display: &Display) -> Options {
     let mut options = Options::new(format);
     if format == Format::Mp4 {
-        options.fps = prefs.fps;
+        options.fps = prefs.fps.for_display(display);
         options.quality = prefs.quality;
         options.audio = prefs.audio;
     }
@@ -149,7 +180,7 @@ pub fn begin(display: Display, region: Rect, format: Format, meta: Metadata, cx:
     cx.set_global(State(Phase::Starting));
     crate::toast::dismiss(cx);
     let capturer = session::capturer(cx);
-    let options = options(format, prefs(cx));
+    let options = options(format, prefs(cx), &display);
     let timer = cx.background_executor().timer(crate::toast::SETTLE);
     let source_display = display.clone();
     let start = cx.background_executor().spawn(async move {

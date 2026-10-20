@@ -106,6 +106,18 @@ impl Format {
     }
 }
 
+/// The highest frame rate a recording takes (240 Hz gaming monitors).
+pub const MAX_FPS: u32 = 240;
+
+/// The frame rate for an MP4 of `display`: its refresh rate (120 or 144 on a gaming
+/// monitor), or [`Format::default_fps`] when the OS does not say.
+pub fn display_fps(display: &Display) -> u32 {
+    display
+        .refresh_hz
+        .unwrap_or_else(|| Format::Mp4.default_fps())
+        .clamp(1, MAX_FPS)
+}
+
 /// How much detail an MP4 keeps, as a bit rate for its size and frame rate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Quality {
@@ -151,7 +163,7 @@ impl Quality {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
     pub format: Format,
-    /// Frames per second to capture (clamped to 1..=60).
+    /// Frames per second to capture (clamped to 1..=[`MAX_FPS`]); see [`display_fps`].
     pub fps: u32,
     /// MP4 bit rate (GIFs ignore it).
     pub quality: Quality,
@@ -408,7 +420,7 @@ fn record(
     shared: Arc<Shared>,
     ready: SyncSender<Result<()>>,
 ) -> Result<Summary> {
-    let fps = options.fps.clamp(1, 60);
+    let fps = options.fps.clamp(1, MAX_FPS);
     let first = match source.next_frame() {
         Ok(f) => f,
         Err(e) => {

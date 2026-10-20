@@ -189,6 +189,26 @@ fn create_device(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11DeviceC
     }
 }
 
+/// The current refresh rate of the monitor named `device` (`\\.\DISPLAY1`), from its display
+/// mode; 0 and 1 there mean "the hardware default", which says nothing.
+fn refresh_hz(device: &[u16; 32]) -> Option<u32> {
+    use windows::Win32::Graphics::Gdi::{DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW};
+    let mut mode = DEVMODEW {
+        dmSize: size_of::<DEVMODEW>() as u16,
+        ..Default::default()
+    };
+    // SAFETY: `device` is the NUL-terminated name DXGI reported; `mode` is a valid DEVMODEW
+    // with its size set.
+    let ok = unsafe {
+        EnumDisplaySettingsW(
+            windows::core::PCWSTR(device.as_ptr()),
+            ENUM_CURRENT_SETTINGS,
+            &mut mode,
+        )
+    };
+    (ok.as_bool() && mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+}
+
 impl Output {
     fn display(&self) -> Display {
         let r = self.desc.DesktopCoordinates;
@@ -215,6 +235,7 @@ impl Output {
             ),
             scale: dpi_x as f32 / 96.0,
             primary: r.left == 0 && r.top == 0,
+            refresh_hz: refresh_hz(&self.desc.DeviceName),
         }
     }
 

@@ -107,11 +107,37 @@ impl Backend {
                     bounds: self.screen,
                     scale: 1.0,
                     primary: true,
+                    refresh_hz: None,
                 }]);
             }
         };
+        // Mode timings, to work out each monitor's refresh rate from its first output's CRTC.
+        let modes = self
+            .conn
+            .randr_get_screen_resources_current(self.root)
+            .ok()
+            .and_then(|c| c.reply().ok())
+            .map(|r| r.modes)
+            .unwrap_or_default();
         let mut out = Vec::with_capacity(monitors.len());
         for m in monitors {
+            let refresh_hz = m.outputs.first().and_then(|&output| {
+                let info = self
+                    .conn
+                    .randr_get_output_info(output, 0)
+                    .ok()?
+                    .reply()
+                    .ok()?;
+                let crtc = self
+                    .conn
+                    .randr_get_crtc_info(info.crtc, 0)
+                    .ok()?
+                    .reply()
+                    .ok()?;
+                let mode = modes.iter().find(|mode| mode.id == crtc.mode)?;
+                let dots = f64::from(mode.htotal) * f64::from(mode.vtotal);
+                crate::whole_hz(f64::from(mode.dot_clock) / dots)
+            });
             let name = self
                 .conn
                 .get_atom_name(m.name)
@@ -131,6 +157,7 @@ impl Backend {
                 // X11 has no per-monitor scale; toolkits read Xft.dpi. 1.0 until the app needs it.
                 scale: 1.0,
                 primary: m.primary,
+                refresh_hz,
             });
         }
         Ok(out)

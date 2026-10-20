@@ -49,7 +49,8 @@ enum Command {
         /// Seconds to record; until Enter is pressed when omitted.
         #[arg(long)]
         seconds: Option<f64>,
-        /// Frames per second, up to 60 (default 60 for MP4, 15 for GIF).
+        /// Frames per second, up to 240 (default: the display's refresh rate for MP4, 15 for
+        /// GIF).
         #[arg(long)]
         fps: Option<u32>,
         /// MP4 bit rate: standard, high or maximum.
@@ -132,6 +133,9 @@ fn record(
     .cloned()
     .context("no such display; see `snapwright displays`")?;
     let mut options = Options::new(format);
+    if format == Format::Mp4 {
+        options.fps = snapwright_record::display_fps(&chosen);
+    }
     if let Some(fps) = fps {
         options.fps = fps;
     }
@@ -183,8 +187,11 @@ fn displays() -> Result<()> {
     let mut capturer = Capturer::new()?;
     for d in capturer.displays()? {
         let b = d.bounds;
+        let hz = d
+            .refresh_hz
+            .map_or_else(|| "  ? Hz".to_owned(), |hz| format!("{hz:>3} Hz"));
         println!(
-            "{:>8}  {:>5}x{:<5} at {:>5},{:<5} scale {:.2}{}  {}",
+            "{:>8}  {:>5}x{:<5} at {:>5},{:<5} scale {:.2}  {hz}{}  {}",
             d.id,
             b.width,
             b.height,

@@ -10,7 +10,7 @@ use anyhow::{Context as _, Result};
 
 use snapwright_record::Quality;
 
-use crate::recording::Prefs;
+use crate::recording::{FrameRate, Prefs};
 use crate::shortcuts::{self, Shortcut, Shortcuts};
 use crate::theme::Choice;
 
@@ -81,9 +81,7 @@ fn parse(src: &str) -> Settings {
         } else if key == "recording.microphone" {
             out.recording.audio.microphone = on().unwrap_or(out.recording.audio.microphone);
         } else if key == "recording.fps" {
-            if let Ok(fps) = value.parse::<u32>()
-                && (1..=60).contains(&fps)
-            {
+            if let Some(fps) = FrameRate::from_key(value) {
                 out.recording.fps = fps;
             }
         } else if key == "recording.quality" {
@@ -133,7 +131,7 @@ fn render(settings: &Settings) -> String {
         ));
     }
     if rec.fps != defaults.fps {
-        out.push_str(&format!("recording.fps = \"{}\"\n", rec.fps));
+        out.push_str(&format!("recording.fps = \"{}\"\n", rec.fps.key()));
     }
     if rec.quality != defaults.quality {
         out.push_str(&format!("recording.quality = \"{}\"\n", rec.quality.key()));
@@ -191,7 +189,7 @@ mod tests {
         assert_eq!(render(&Settings::default()), "", "defaults are not written");
         let s = Settings {
             recording: Prefs {
-                fps: 30,
+                fps: FrameRate::Fixed(30),
                 quality: Quality::Maximum,
                 audio: Audio {
                     system: true,
@@ -206,7 +204,7 @@ mod tests {
         assert_eq!(parse(&text), s);
         // Nonsense keeps the defaults.
         let odd = parse(
-            "recording.fps = \"240\"\nrecording.quality = \"ultra\"\nrecording.microphone = \"maybe\"",
+            "recording.fps = \"500\"\nrecording.quality = \"ultra\"\nrecording.microphone = \"maybe\"",
         );
         assert_eq!(odd.recording, Prefs::default());
     }

@@ -100,7 +100,8 @@ Gate: 1,000 beta users and 99.5% crash-free sessions.
       video goes to `Movies/Snapwright` and the library. `snapwright record` in the CLI.
       Sound and HD (Jeremie, 2026-10-20): MP4s record system audio and/or the microphone,
       mixed into one AAC track (cpal on macOS and Windows, `ffmpeg -f pulse` on Linux), at
-      60 fps by default with Standard/High/Maximum bit rates; tray > Recording options, `A`
+      the display's refresh rate (up to 240 fps; 60 when unknown) with Standard/High/Maximum
+      bit rates; tray > Recording options, `A`
       and `M` in the record overlay, `--system-audio --mic --quality` in the CLI.
       S3 uploads and after-capture workflows remain.
 - [ ] CLI library queries; licensing and payments; docs site.
@@ -119,7 +120,7 @@ Licence, pricing, cloud sharing and team size: see the plan's decisions table.
 - Recording: pick the microphone (not only the default), per-source volume, and a level
   meter on the record bar; Linux system audio through the portal on GNOME/KDE.
 - Recording: an output size option (1080p, 1440p) so 5K/6K displays fit H.264's 4096-wide
-  limit, and 120 fps for games; HEVC where the OS encoder has it.
+  limit; HEVC where the OS encoder has it.
 - Recording: macOS through a running `SCStream` (IOSurfaces straight into the writer, 60 fps)
   instead of one `SCScreenshotManager` grab per frame; Windows straight from the duplication
   texture into a GPU NV12 conversion.
