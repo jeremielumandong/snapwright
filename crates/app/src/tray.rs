@@ -1,5 +1,5 @@
-//! The tray (menu bar) icon: Capture, Record, Open captures folder, Theme, Keyboard
-//! shortcuts, updates, Quit.
+//! The tray (menu bar) icon: Capture, Record, recording options (sound, frame rate,
+//! quality), Open captures folder, Theme, Keyboard shortcuts, updates, Quit.
 //!
 //! macOS and Windows use the native status item; Linux uses StatusNotifierItem over D-Bus
 //! (`tray-icon`'s `ksni` backend), so no GTK is needed. Menu clicks arrive on a platform
@@ -9,6 +9,7 @@ use std::cell::{Cell, RefCell};
 
 use anyhow::Result;
 use futures::channel::mpsc;
+use snapwright_record::Quality;
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -16,6 +17,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::hotkey;
 use crate::omarchy;
+use crate::recording::{self, Prefs};
 use crate::theme::Choice;
 
 /// What the user picked from the tray menu.
@@ -26,12 +28,32 @@ pub enum Action {
     RepeatLast,
     Record,
     RecordGif,
+    Recording(RecordingChoice),
     OpenLibrary,
     OpenFolder,
     Shortcuts,
     Theme(Choice),
     Update,
     Quit,
+}
+
+/// A pick from the Recording submenu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordingChoice {
+    /// Toggles recording what the computer plays.
+    SystemAudio,
+    /// Toggles recording the microphone.
+    Microphone,
+    Fps(u32),
+    Quality(Quality),
+}
+
+/// The Recording submenu's items, ticked to match [`Prefs`].
+struct RecordingItems {
+    system: CheckMenuItem,
+    microphone: CheckMenuItem,
+    fps: Vec<(u32, CheckMenuItem)>,
+    quality: Vec<(Quality, CheckMenuItem)>,
 }
 
 /// Keeps the tray icon alive for the life of the app.
@@ -42,6 +64,7 @@ pub struct Tray {
     record: MenuItem,
     record_gif: MenuItem,
     themes: Vec<(Choice, CheckMenuItem)>,
+    recording_items: RecordingItems,
     update: MenuItem,
     labels: RefCell<Labels>,
     recording: Cell<bool>,
@@ -88,6 +111,19 @@ impl Tray {
             item.set_checked(*c == choice);
         }
     }
+
+    /// Ticks the recording options in use.
+    pub fn set_recording_prefs(&self, prefs: Prefs) {
+        let items = &self.recording_items;
+        items.system.set_checked(prefs.audio.system);
+        items.microphone.set_checked(prefs.audio.microphone);
+        for (fps, item) in &items.fps {
+            item.set_checked(*fps == prefs.fps);
+        }
+        for (q, item) in &items.quality {
+            item.set_checked(*q == prefs.quality);
+        }
+    }
 }
 
 impl gpui_kit::Global for Tray {}
@@ -97,6 +133,10 @@ const ID_DELAYED: &str = "capture-delayed";
 const ID_REPEAT: &str = "repeat-last";
 const ID_RECORD: &str = "record";
 const ID_RECORD_GIF: &str = "record-gif";
+const ID_SYSTEM_AUDIO: &str = "record-system-audio";
+const ID_MICROPHONE: &str = "record-microphone";
+const ID_FPS_PREFIX: &str = "record-fps-";
+const ID_QUALITY_PREFIX: &str = "record-quality-";
 const ID_OPEN: &str = "open-folder";
 const ID_LIBRARY: &str = "library";
 const ID_SHORTCUTS: &str = "shortcuts";
@@ -155,6 +195,7 @@ pub fn create(
     labels: &Labels,
     theme: Choice,
     omarchy: bool,
+    prefs: Prefs,
 ) -> Result<(Tray, mpsc::UnboundedReceiver<Action>)> {
     let menu = Menu::new();
     let themes: Vec<(Choice, CheckMenuItem)> = Choice::all()
@@ -187,6 +228,53 @@ pub fn create(
         true,
         None,
     );
+    let recording_items = RecordingItems {
+        system: CheckMenuItem::with_id(
+            ID_SYSTEM_AUDIO,
+            "Record system audio",
+            true,
+            prefs.audio.system,
+            None,
+        ),
+        microphone: CheckMenuItem::with_id(
+            ID_MICROPHONE,
+            "Record microphone",
+            true,
+            prefs.audio.microphone,
+            None,
+        ),
+        fps: recording::FPS_CHOICES
+            .into_iter()
+            .map(|fps| {
+                let id = format!("{ID_FPS_PREFIX}{fps}");
+                let item =
+                    CheckMenuItem::with_id(id, format!("{fps} fps"), true, fps == prefs.fps, None);
+                (fps, item)
+            })
+            .collect(),
+        quality: Quality::ALL
+            .into_iter()
+            .map(|q| {
+                let id = format!("{ID_QUALITY_PREFIX}{}", q.key());
+                let text = format!("{} quality", q.label());
+                (
+                    q,
+                    CheckMenuItem::with_id(id, text, true, q == prefs.quality, None),
+                )
+            })
+            .collect(),
+    };
+    let recording_menu = Submenu::with_id("recording", "Recording options", true);
+    recording_menu.append(&recording_items.system)?;
+    recording_menu.append(&recording_items.microphone)?;
+    recording_menu.append(&PredefinedMenuItem::separator())?;
+    for (_, item) in &recording_items.fps {
+        recording_menu.append(item)?;
+    }
+    recording_menu.append(&PredefinedMenuItem::separator())?;
+    for (_, item) in &recording_items.quality {
+        recording_menu.append(item)?;
+    }
     let update = MenuItem::with_id(ID_UPDATE, "Check for updates", true, None);
     let capture = MenuItem::with_id(
         ID_CAPTURE,
@@ -207,6 +295,7 @@ pub fn create(
         &PredefinedMenuItem::separator(),
         &record,
         &record_gif,
+        &recording_menu,
         &PredefinedMenuItem::separator(),
         &MenuItem::with_id(ID_LIBRARY, "Open library", true, None),
         &MenuItem::with_id(ID_OPEN, "Open captures folder", true, None),
@@ -249,6 +338,7 @@ pub fn create(
             record,
             record_gif,
             themes,
+            recording_items,
             update,
             labels: RefCell::new(labels.clone()),
             recording: Cell::new(false),
@@ -269,10 +359,24 @@ fn action_for(id: &MenuId) -> Option<Action> {
         ID_SHORTCUTS => Some(Action::Shortcuts),
         ID_UPDATE => Some(Action::Update),
         ID_QUIT => Some(Action::Quit),
-        other => other
-            .strip_prefix(ID_THEME_PREFIX)
-            .and_then(Choice::from_key)
-            .map(Action::Theme),
+        ID_SYSTEM_AUDIO => Some(Action::Recording(RecordingChoice::SystemAudio)),
+        ID_MICROPHONE => Some(Action::Recording(RecordingChoice::Microphone)),
+        other => {
+            if let Some(fps) = other.strip_prefix(ID_FPS_PREFIX) {
+                return fps
+                    .parse()
+                    .ok()
+                    .map(|fps| Action::Recording(RecordingChoice::Fps(fps)));
+            }
+            if let Some(q) = other.strip_prefix(ID_QUALITY_PREFIX) {
+                return Quality::from_key(q)
+                    .map(|q| Action::Recording(RecordingChoice::Quality(q)));
+            }
+            other
+                .strip_prefix(ID_THEME_PREFIX)
+                .and_then(Choice::from_key)
+                .map(Action::Theme)
+        }
     }
 }
 
@@ -357,6 +461,25 @@ mod tests {
         );
         assert_eq!(action_for(&MenuId::new("theme-sepia")), None);
         assert_eq!(action_for(&MenuId::new("other")), None);
+        assert_eq!(
+            action_for(&MenuId::new(ID_SYSTEM_AUDIO)),
+            Some(Action::Recording(RecordingChoice::SystemAudio))
+        );
+        assert_eq!(
+            action_for(&MenuId::new(ID_MICROPHONE)),
+            Some(Action::Recording(RecordingChoice::Microphone))
+        );
+        assert_eq!(
+            action_for(&MenuId::new("record-fps-30")),
+            Some(Action::Recording(RecordingChoice::Fps(30)))
+        );
+        assert_eq!(
+            action_for(&MenuId::new("record-quality-maximum")),
+            Some(Action::Recording(RecordingChoice::Quality(
+                Quality::Maximum
+            )))
+        );
+        assert_eq!(action_for(&MenuId::new("record-quality-ultra")), None);
     }
 
     #[test]

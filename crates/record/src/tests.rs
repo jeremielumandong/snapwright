@@ -263,7 +263,179 @@ fn formats_from_paths() {
 }
 
 #[test]
-fn bitrate_scales_with_pixels() {
-    assert_eq!(encoder::bitrate(1920, 1080, 30), 6_220_800);
-    assert_eq!(encoder::bitrate(100, 100, 30), 1_000_000);
+fn bitrate_scales_with_pixels_and_quality() {
+    use Quality::*;
+    assert_eq!(encoder::bitrate(1920, 1080, 30, Standard), 6_220_800);
+    assert_eq!(encoder::bitrate(1920, 1080, 60, High), 18_662_400);
+    assert_eq!(encoder::bitrate(1920, 1080, 60, Maximum), 37_324_800);
+    assert_eq!(encoder::bitrate(100, 100, 30, High), 1_000_000);
+    // 4K at 60 fps stays within what H.264 hardware takes.
+    assert_eq!(encoder::bitrate(3840, 2160, 60, Maximum), 149_299_200);
+    assert_eq!(encoder::bitrate(7680, 4320, 60, Maximum), 160_000_000);
+    assert_eq!(Quality::from_key("MAXIMUM"), Some(Maximum));
+    assert_eq!(Options::new(Format::Mp4).fps, 60);
+}
+
+/// A 440 Hz tone at 44.1 kHz mono, pushed in 10 ms pieces like a device would.
+struct Tone;
+
+struct ToneGuard {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for ToneGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(t) = self.thread.take() {
+            t.join().unwrap();
+        }
+    }
+}
+
+impl AudioSource for Tone {
+    fn name(&self) -> String {
+        "tone".into()
+    }
+
+    fn start(self: Box<Self>, feed: AudioFeed) -> Result<Box<dyn std::any::Any>> {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = stop.clone();
+        let thread = std::thread::spawn(move || {
+            let mut n = 0u64;
+            let started = Instant::now();
+            while !flag.load(std::sync::atomic::Ordering::Relaxed) {
+                // Everything due by now, so the tone keeps real time.
+                let due = (started.elapsed().as_secs_f64() * 44_100.0) as u64;
+                let chunk: Vec<f32> = (n..due)
+                    .map(|i| (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 0.5)
+                    .collect();
+                n = due;
+                feed.push(&chunk, 1, 44_100);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        Ok(Box::new(ToneGuard {
+            stop,
+            thread: Some(thread),
+        }))
+    }
+}
+
+/// `ffprobe`'s view of the first sound stream, when ffprobe is installed.
+fn ffprobe_audio(path: &std::path::Path) -> Option<String> {
+    let out = std::process::Command::new("ffprobe")
+        .args(["-v", "error", "-select_streams", "a:0"])
+        .args([
+            "-show_entries",
+            "stream=codec_name,sample_rate,channels,duration",
+        ])
+        .args(["-of", "default=noprint_wrappers=1"])
+        .arg(path)
+        .output()
+        .ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// The sound's mean volume in dB, when ffmpeg is installed.
+fn mean_volume(path: &std::path::Path) -> Option<f64> {
+    let out = std::process::Command::new("ffmpeg")
+        .args(["-hide_banner", "-nostdin", "-i"])
+        .arg(path)
+        .args(["-map", "0:a", "-af", "volumedetect", "-f", "null", "-"])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stderr)
+        .lines()
+        .find_map(|l| l.split("mean_volume:").nth(1))
+        .and_then(|v| v.trim().trim_end_matches("dB").trim().parse().ok())
+}
+
+#[test]
+fn mp4_with_sound_has_an_aac_track_that_keeps_time() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("sound.mp4");
+    let source = Moving {
+        width: 320,
+        height: 240,
+        n: 0,
+    };
+    let recorder = match Recorder::start_with_audio(
+        source,
+        vec![Box::new(Tone)],
+        Options::new(Format::Mp4),
+        &path,
+    ) {
+        Err(RecordError::Unsupported(why)) if cfg!(target_os = "linux") => {
+            eprintln!("skipped: {why}");
+            return;
+        }
+        other => other.expect("record"),
+    };
+    std::thread::sleep(Duration::from_millis(700));
+    recorder.pause();
+    std::thread::sleep(Duration::from_millis(400));
+    recorder.resume();
+    std::thread::sleep(Duration::from_millis(700));
+    let summary = recorder.stop().expect("stop");
+    assert!(summary.audio, "{:?}", summary.audio_problems);
+    assert!(summary.audio_problems.is_empty());
+    let bytes = std::fs::read(&summary.path).unwrap();
+    assert!(
+        bytes.windows(4).any(|w| w == b"mp4a"),
+        "no AAC sample entry"
+    );
+    let boxes = top_level_boxes(&bytes);
+    let moov = boxes.iter().position(|b| b == "moov");
+    let mdat = boxes.iter().position(|b| b == "mdat");
+    assert!(moov < mdat, "index after the data: {boxes:?}");
+    // No parts left beside the file.
+    let names: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, vec![std::ffi::OsString::from("sound.mp4")]);
+    if let Some(probe) = ffprobe_audio(&summary.path) {
+        assert!(probe.contains("codec_name=aac"), "{probe}");
+        assert!(probe.contains("sample_rate=48000"), "{probe}");
+        assert!(probe.contains("channels=2"), "{probe}");
+        let duration: f64 = probe
+            .lines()
+            .find_map(|l| l.strip_prefix("duration="))
+            .and_then(|d| d.parse().ok())
+            .expect("duration");
+        // The pause is left out of the sound as it is of the video.
+        let video = summary.duration.as_secs_f64();
+        assert!(
+            (duration - video).abs() < 0.2,
+            "sound {duration} s, video {video} s"
+        );
+    }
+    if let Some(volume) = mean_volume(&summary.path) {
+        // A 0.5 sine is about -9 dB; silence would be -91.
+        assert!(volume > -20.0, "mean volume {volume} dB");
+    }
+}
+
+#[test]
+fn gifs_ignore_sound() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("quiet.gif");
+    let source = Moving {
+        width: 64,
+        height: 48,
+        n: 0,
+    };
+    let recorder = Recorder::start_with_audio(
+        source,
+        vec![Box::new(Tone)],
+        Options::new(Format::Gif),
+        &path,
+    )
+    .unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    let summary = recorder.stop().unwrap();
+    assert!(!summary.audio);
 }

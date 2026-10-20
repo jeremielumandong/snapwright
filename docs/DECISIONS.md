@@ -358,3 +358,24 @@ From the "Omarchy theme implementation" design handoff.
   (`output::dib_v5`; Windows synthesises `CF_DIB` and `CF_BITMAP` from it) and the same PNG
   bytes as before, off the UI thread. A top-down DIB is avoided because Word cannot paste
   one. macOS keeps GPUI's `public.png` write.
+
+## 2026-10-20: Recording sound and HD
+
+- Sound is captured in-process and mixed on the recorder's clock, not muxed by the OS
+  from a second capture session, so pause, the start offset and both sources stay in one
+  timeline: each source feeds a 48 kHz stereo queue (linear resampling), and the capture
+  thread takes the mix 250 ms behind the latest frame, padding a silent source with zeros
+  (WASAPI loopback sends nothing while nothing plays). Sound queued before the start or
+  during a pause is dropped; a source more than 500 ms ahead loses its oldest sound.
+- Devices go through cpal 0.18 (Apache-2.0) on macOS and Windows: its input stream on the
+  default output device is WASAPI loopback, and on macOS a Core Audio process tap (14.6+).
+  That links `AudioHardwareCreateProcessTap` (14.2+), so the macOS minimum is now 14.2. No
+  ScreenCaptureKit audio stream: it would need a running `SCStream`, which the capture
+  backend does not have yet. Linux uses `ffmpeg -f pulse` (the monitor source for system
+  audio), like MP4 encoding there, so no ALSA/PipeWire build dependency is added.
+- A source that cannot start (no device, permission refused, no Pulse server) is logged and
+  left out; the recording goes on. The app's entitlements now include
+  `com.apple.security.device.audio-input`, which the hardened runtime needs for the mic.
+- MP4s default to 60 fps at High quality (0.15 bit per pixel per frame, H.264 High
+  profile; 19 Mbit/s for 1080p60). Standard keeps the old 0.1, Maximum is 0.3; caps are 50,
+  100 and 160 Mbit/s. Linux maps them to x264 CRF 20, 17 and 14.

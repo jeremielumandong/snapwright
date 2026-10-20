@@ -18,6 +18,9 @@
   <key>NSSupportsAutomaticGraphicsSwitching</key><true/>
   <!-- Shown by the Screen Recording prompt (ScreenCaptureKit) on macOS 15 and later. -->
   <key>NSScreenCaptureUsageDescription</key><string>@APP_NAME@ captures the screen when you take a screenshot.</string>
+  <!-- Recording sound: the microphone, and what the Mac plays (a Core Audio process tap). -->
+  <key>NSMicrophoneUsageDescription</key><string>@APP_NAME@ records your microphone when you turn it on for a screen recording.</string>
+  <key>NSAudioCaptureUsageDescription</key><string>@APP_NAME@ records the sound your Mac plays when you turn on system audio for a screen recording.</string>
   <key>NSHumanReadableCopyright</key><string>Licensed under Apache-2.0</string>
 </dict>
 </plist>

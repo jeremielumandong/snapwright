@@ -6,6 +6,10 @@
 //! The bar sits outside the recorded area when there is room. Where the OS keeps this app's
 //! windows out of captures (macOS, and Windows 10 2004+) it may also sit inside; elsewhere it
 //! is left out when it would cover the recording, and the hotkey or tray stops it.
+//!
+//! [`Prefs`] say how videos are recorded: frame rate, quality, and whether the system's sound
+//! and the microphone go in. They are picked in the tray's Recording options, or with `A` and
+//! `M` in the record overlay, and saved in `settings.toml`.
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -20,7 +24,7 @@ use gpui_kit::{
 };
 use snapwright_capture::{Display, Rect};
 use snapwright_library::{Metadata, NewCapture, NewRecording};
-use snapwright_record::{DisplaySource, Format, Options, Recorder};
+use snapwright_record::{Audio, DisplaySource, Format, Options, Quality, Recorder};
 
 use crate::session::{self, LibraryService, Mode};
 use crate::theme::hud;
@@ -30,6 +34,74 @@ const HUD_H: f32 = 44.;
 /// Space between the recorded area and the bar, and the bar and the display edge.
 const GAP: f32 = 12.;
 const EDGE: f32 = 8.;
+
+/// How videos are recorded. GIFs keep their own frame rate and have no sound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Prefs {
+    pub fps: u32,
+    pub quality: Quality,
+    pub audio: Audio,
+}
+
+impl Default for Prefs {
+    fn default() -> Self {
+        Self {
+            fps: Format::Mp4.default_fps(),
+            quality: Quality::default(),
+            audio: Audio::default(),
+        }
+    }
+}
+
+impl Global for Prefs {}
+
+/// The frame rates the tray offers.
+pub const FPS_CHOICES: [u32; 2] = [60, 30];
+
+/// Sets the saved recording options at launch.
+pub fn init(prefs: Prefs, cx: &mut App) {
+    cx.set_global(prefs);
+}
+
+/// The recording options in use.
+pub fn prefs(cx: &App) -> Prefs {
+    cx.try_global::<Prefs>().copied().unwrap_or_default()
+}
+
+/// Applies a pick from the tray or the overlay, ticks the tray to match and saves it.
+pub fn choose(choice: crate::tray::RecordingChoice, cx: &mut App) {
+    use crate::tray::RecordingChoice;
+    let mut p = prefs(cx);
+    match choice {
+        RecordingChoice::SystemAudio => p.audio.system = !p.audio.system,
+        RecordingChoice::Microphone => p.audio.microphone = !p.audio.microphone,
+        RecordingChoice::Fps(fps) => p.fps = fps.clamp(1, 60),
+        RecordingChoice::Quality(q) => p.quality = q,
+    }
+    cx.set_global(p);
+    if let Some(tray) = cx.try_global::<crate::tray::Tray>() {
+        tray.set_recording_prefs(p);
+    }
+    tracing::info!(?p, "recording options");
+    cx.background_executor()
+        .spawn(async move {
+            if let Err(e) = crate::settings::update(|s| s.recording = p) {
+                tracing::warn!(error = %e, "could not save the recording options");
+            }
+        })
+        .detach();
+}
+
+/// Recorder options for `format` with these preferences.
+fn options(format: Format, prefs: Prefs) -> Options {
+    let mut options = Options::new(format);
+    if format == Format::Mp4 {
+        options.fps = prefs.fps;
+        options.quality = prefs.quality;
+        options.audio = prefs.audio;
+    }
+    options
+}
 
 /// Where recording stands.
 #[derive(Default)]
@@ -77,13 +149,14 @@ pub fn begin(display: Display, region: Rect, format: Format, meta: Metadata, cx:
     cx.set_global(State(Phase::Starting));
     crate::toast::dismiss(cx);
     let capturer = session::capturer(cx);
+    let options = options(format, prefs(cx));
     let timer = cx.background_executor().timer(crate::toast::SETTLE);
     let source_display = display.clone();
     let start = cx.background_executor().spawn(async move {
         timer.await;
         let path = crate::output::recording_path(format.extension())?;
         let source = DisplaySource::new(capturer, source_display, Some(region));
-        anyhow::Ok(Recorder::start(source, Options::new(format), path)?)
+        anyhow::Ok(Recorder::start(source, options, path)?)
     });
     cx.spawn(async move |cx| {
         let started = start.await;
@@ -139,12 +212,16 @@ pub fn stop(cx: &mut App) {
         if let Some(why) = &summary.interrupted {
             tracing::warn!(reason = %why, "recording stopped early");
         }
+        for problem in &summary.audio_problems {
+            tracing::warn!(problem = %problem, "recorded without this sound");
+        }
         let ms = summary.duration.as_millis() as u64;
         tracing::info!(
             path = %summary.path.display(),
             seconds = summary.duration.as_secs_f64(),
             frames = summary.frames,
             dropped = summary.dropped,
+            audio = summary.audio,
             ?format,
             "recording saved"
         );

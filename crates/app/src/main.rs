@@ -124,7 +124,8 @@ fn main() -> Result<()> {
             }
             shortcuts::init(saved.shortcuts, cx);
             let labels = cx.global::<tray::Labels>().clone();
-            match tray::create(&labels, theme, has_omarchy) {
+            recording::init(saved.recording, cx);
+            match tray::create(&labels, theme, has_omarchy, saved.recording) {
                 Ok((tray, mut actions)) => {
                     cx.set_global(tray);
                     cx.spawn(async move |cx| {
@@ -227,6 +228,7 @@ fn on_tray(action: tray::Action, cx: &mut gpui_kit::App) {
         tray::Action::RepeatLast => session::repeat_last(Instant::now(), cx),
         tray::Action::Record => recording::toggle(Format::Mp4, Instant::now(), cx),
         tray::Action::RecordGif => recording::toggle(Format::Gif, Instant::now(), cx),
+        tray::Action::Recording(choice) => recording::choose(choice, cx),
         tray::Action::OpenLibrary => library_view::open(cx),
         tray::Action::Shortcuts => shortcuts_view::open(cx),
         tray::Action::OpenFolder => match output::captures_dir() {

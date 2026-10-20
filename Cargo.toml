@@ -56,6 +56,9 @@ ab_glyph = "0.2"
 
 # recording: GIF encoding everywhere; MP4 goes through the OS encoder (or ffmpeg on Linux)
 gif = "0.14"
+# recording sound on macOS and Windows: Core Audio (with loopback through a process tap) and
+# WASAPI (loopback on the output device). Linux reads PulseAudio through ffmpeg.
+cpal = { version = "0.18.2", default-features = false }
 
 # UI: gpui-kit is the facade over gpui (gpui-pre =0.3.8) + gpui-component 0.7.1, kept in
 # lockstep, as in Switchyard. `image` must match the version gpui links (its `Frame` type).
@@ -91,7 +94,8 @@ block2 = "0.6"
 objc2-vision = { version = "0.3", default-features = false, features = ["std", "objc2-core-foundation", "objc2-core-graphics", "VNRequest", "VNRequestHandler", "VNRecognizeTextRequest", "VNObservation", "VNTypes"] }
 objc2-av-foundation = { version = "0.3", default-features = false, features = ["std", "block2", "objc2-core-media", "objc2-core-video", "AVAssetWriter", "AVAssetWriterInput", "AVMediaFormat", "AVVideoSettings", "AVAnimation"] }
 objc2-core-video = { version = "0.3", default-features = false, features = ["std", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferPool", "CVReturn"] }
-objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime"] }
+objc2-core-media = { version = "0.3", default-features = false, features = ["std", "CMTime", "CMSampleBuffer", "CMBlockBuffer", "CMFormatDescription", "CMBase", "objc2-core-audio-types"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

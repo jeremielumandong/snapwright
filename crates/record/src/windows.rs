@@ -1,25 +1,30 @@
 //! MP4 on Windows: a Media Foundation sink writer with the system H.264 encoder, which is
 //! the GPU's (Intel Quick Sync, NVENC, AMD VCE) when one is present and Microsoft's software
 //! encoder otherwise. Frames go in as NV12, converted here, so no colour converter is needed
-//! in the pipeline and the colours are BT.709 like the other platforms'.
+//! in the pipeline and the colours are BT.709 like the other platforms'. Sound goes to a
+//! second stream as 16-bit PCM, which the system AAC encoder compresses.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use snapwright_capture::Frame;
 use windows::Win32::Media::MediaFoundation::{
-    IMFAttributes, IMFSinkWriter, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
-    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_PIXEL_ASPECT_RATIO,
-    MF_MT_SUBTYPE, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX,
-    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_VERSION, MFCreateAttributes, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateSinkWriterFromURL, MFMediaType_Video,
-    MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_H264,
-    MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoTransferMatrix_BT709,
+    IMFAttributes, IMFMediaType, IMFSinkWriter, MF_MT_AUDIO_AVG_BYTES_PER_SECOND,
+    MF_MT_AUDIO_BITS_PER_SAMPLE, MF_MT_AUDIO_BLOCK_ALIGNMENT, MF_MT_AUDIO_NUM_CHANNELS,
+    MF_MT_AUDIO_SAMPLES_PER_SECOND, MF_MT_AVG_BITRATE, MF_MT_DEFAULT_STRIDE, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MPEG2_PROFILE,
+    MF_MT_PIXEL_ASPECT_RATIO, MF_MT_SUBTYPE, MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_YUV_MATRIX,
+    MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, MF_VERSION, MFAudioFormat_AAC, MFAudioFormat_PCM,
+    MFCreateAttributes, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFCreateSinkWriterFromURL, MFMediaType_Audio, MFMediaType_Video, MFNominalRange_16_235,
+    MFSTARTUP_FULL, MFShutdown, MFStartup, MFVideoFormat_H264, MFVideoFormat_NV12,
+    MFVideoInterlace_Progressive, MFVideoTransferMatrix_BT709, eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 use windows::core::HSTRING;
 
-use crate::encoder::{Encoder, bitrate};
+use crate::audio::{CHANNELS, SAMPLE_RATE};
+use crate::encoder::{AUDIO_BITRATE, Encoder, Video};
 use crate::{RecordError, Result};
 
 fn err(api: &'static str, e: windows::core::Error) -> RecordError {
@@ -52,6 +57,9 @@ pub(crate) struct MfEncoder {
     // Field order is drop order: the writer goes before the runtime shuts down.
     writer: IMFSinkWriter,
     stream: u32,
+    /// The sound stream, when there is one.
+    sound: Option<u32>,
+    pcm: Vec<u8>,
     width: u32,
     height: u32,
     path: PathBuf,
@@ -62,7 +70,10 @@ pub(crate) struct MfEncoder {
 }
 
 impl MfEncoder {
-    pub(crate) fn create(path: &Path, width: u32, height: u32, fps: u32) -> Result<Self> {
+    pub(crate) fn create(path: &Path, video: Video) -> Result<Self> {
+        let Video {
+            width, height, fps, ..
+        } = video;
         // SAFETY: COM and Media Foundation start-up for this thread, undone by `Runtime`.
         unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }
             .ok()
@@ -78,7 +89,7 @@ impl MfEncoder {
         let rate = (u64::from(fps) << 32) | 1;
         // SAFETY: plain Media Foundation object creation and attribute setters on objects
         // this function owns; GUID pointers are to statics.
-        let (writer, stream) = unsafe {
+        let (writer, stream, sound) = unsafe {
             let mut attrs: Option<IMFAttributes> = None;
             MFCreateAttributes(&mut attrs, 2).map_err(|e| err("MFCreateAttributes", e))?;
             let attrs = attrs.ok_or_else(|| RecordError::Encoder {
@@ -97,7 +108,9 @@ impl MfEncoder {
                 .map_err(|e| err("SetGUID", e))?;
             out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)
                 .map_err(|e| err("SetGUID", e))?;
-            out.SetUINT32(&MF_MT_AVG_BITRATE, bitrate(width, height, fps))
+            out.SetUINT32(&MF_MT_AVG_BITRATE, video.bitrate())
+                .map_err(|e| err("SetUINT32", e))?;
+            out.SetUINT32(&MF_MT_MPEG2_PROFILE, eAVEncH264VProfile_High.0 as u32)
                 .map_err(|e| err("SetUINT32", e))?;
             set_video(&out, size, rate)?;
             let stream = writer
@@ -118,14 +131,21 @@ impl MfEncoder {
             writer
                 .SetInputMediaType(stream, &input, None)
                 .map_err(|e| err("IMFSinkWriter::SetInputMediaType", e))?;
+            let sound = if video.audio {
+                Some(add_sound(&writer)?)
+            } else {
+                None
+            };
             writer
                 .BeginWriting()
                 .map_err(|e| err("IMFSinkWriter::BeginWriting", e))?;
-            (writer, stream)
+            (writer, stream, sound)
         };
         Ok(Self {
             writer,
             stream,
+            sound,
+            pcm: Vec::new(),
             width,
             height,
             path: path.to_path_buf(),
@@ -137,7 +157,18 @@ impl MfEncoder {
 
     /// Writes one NV12 picture shown from `at` for `duration`.
     fn write(&self, nv12: &[u8], at: Duration, duration: Duration) -> Result<()> {
-        let len = nv12.len() as u32;
+        self.write_sample(self.stream, nv12, at, duration)
+    }
+
+    /// Writes `bytes` to `stream` as one sample shown from `at` for `duration`.
+    fn write_sample(
+        &self,
+        stream: u32,
+        bytes: &[u8],
+        at: Duration,
+        duration: Duration,
+    ) -> Result<()> {
+        let len = bytes.len() as u32;
         // SAFETY: the buffer is created with `len` bytes, locked for the copy and unlocked
         // before it is handed to the sample; the pointer is only used while locked.
         unsafe {
@@ -146,7 +177,7 @@ impl MfEncoder {
             buffer
                 .Lock(&mut data, None, None)
                 .map_err(|e| err("IMFMediaBuffer::Lock", e))?;
-            std::ptr::copy_nonoverlapping(nv12.as_ptr(), data, nv12.len());
+            std::ptr::copy_nonoverlapping(bytes.as_ptr(), data, bytes.len());
             buffer
                 .Unlock()
                 .map_err(|e| err("IMFMediaBuffer::Unlock", e))?;
@@ -164,9 +195,54 @@ impl MfEncoder {
                 .SetSampleDuration(hns(duration).max(1))
                 .map_err(|e| err("IMFSample::SetSampleDuration", e))?;
             self.writer
-                .WriteSample(self.stream, &sample)
+                .WriteSample(stream, &sample)
                 .map_err(|e| err("IMFSinkWriter::WriteSample", e))
         }
+    }
+}
+
+/// Adds an AAC stream fed with 16-bit PCM at 48 kHz stereo (the AAC encoder takes no
+/// floats). Returns its index.
+///
+/// # Safety
+/// `writer` must not have begun writing.
+unsafe fn add_sound(writer: &IMFSinkWriter) -> Result<u32> {
+    let block = (CHANNELS * 2) as u32;
+    // SAFETY: plain Media Foundation object creation and attribute setters on objects this
+    // function owns; GUID pointers are to statics.
+    unsafe {
+        let audio = |t: &IMFMediaType, subtype| -> Result<()> {
+            t.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Audio)
+                .map_err(|e| err("SetGUID", e))?;
+            t.SetGUID(&MF_MT_SUBTYPE, subtype)
+                .map_err(|e| err("SetGUID", e))?;
+            t.SetUINT32(&MF_MT_AUDIO_SAMPLES_PER_SECOND, SAMPLE_RATE)
+                .map_err(|e| err("SetUINT32", e))?;
+            t.SetUINT32(&MF_MT_AUDIO_NUM_CHANNELS, CHANNELS as u32)
+                .map_err(|e| err("SetUINT32", e))?;
+            t.SetUINT32(&MF_MT_AUDIO_BITS_PER_SAMPLE, 16)
+                .map_err(|e| err("SetUINT32", e))
+        };
+        let out = MFCreateMediaType().map_err(|e| err("MFCreateMediaType", e))?;
+        audio(&out, &MFAudioFormat_AAC)?;
+        // The encoder takes 12000, 16000, 20000 or 24000 bytes a second.
+        out.SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AUDIO_BITRATE / 8)
+            .map_err(|e| err("SetUINT32", e))?;
+        let stream = writer
+            .AddStream(&out)
+            .map_err(|e| err("IMFSinkWriter::AddStream (audio)", e))?;
+        let input = MFCreateMediaType().map_err(|e| err("MFCreateMediaType", e))?;
+        audio(&input, &MFAudioFormat_PCM)?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_BLOCK_ALIGNMENT, block)
+            .map_err(|e| err("SetUINT32", e))?;
+        input
+            .SetUINT32(&MF_MT_AUDIO_AVG_BYTES_PER_SECOND, SAMPLE_RATE * block)
+            .map_err(|e| err("SetUINT32", e))?;
+        writer
+            .SetInputMediaType(stream, &input, None)
+            .map_err(|e| err("IMFSinkWriter::SetInputMediaType (audio)", e))?;
+        Ok(stream)
     }
 }
 
@@ -213,6 +289,24 @@ impl Encoder for MfEncoder {
         }
         self.pending = Some((nv12, at));
         Ok(())
+    }
+
+    fn push_audio(&mut self, samples: &[f32], at: Duration) -> Result<()> {
+        let Some(stream) = self.sound else {
+            return Ok(());
+        };
+        let mut pcm = std::mem::take(&mut self.pcm);
+        pcm.clear();
+        pcm.extend(
+            samples
+                .iter()
+                .flat_map(|s| ((s.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes()),
+        );
+        let frames = (samples.len() / CHANNELS) as u32;
+        let duration = Duration::from_secs(u64::from(frames)) / SAMPLE_RATE;
+        let written = self.write_sample(stream, &pcm, at, duration);
+        self.pcm = pcm;
+        written
     }
 
     fn size(&self) -> (u32, u32) {

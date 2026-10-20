@@ -30,8 +30,9 @@ done
 need cargo "Install Rust from https://rustup.rs"
 need lipo "Install the Xcode command line tools: xcode-select --install"
 
-# ScreenCaptureKit's SCScreenshotManager, the only capture path, needs macOS 14.
-MIN_MACOS="${MIN_MACOS:-14.0}"
+# ScreenCaptureKit's SCScreenshotManager, the only capture path, needs macOS 14; recording
+# sound links Core Audio's process taps (AudioHardwareCreateProcessTap), which are 14.2+.
+MIN_MACOS="${MIN_MACOS:-14.2}"
 export MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 
 case "$ARCH" in
