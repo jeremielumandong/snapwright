@@ -60,6 +60,8 @@ struct Output {
     name: String,
     /// Current mode in hardware pixels, before the output transform.
     mode: Option<(i32, i32)>,
+    /// Current mode's refresh rate in millihertz.
+    refresh_mhz: i32,
     position: (i32, i32),
     integer_scale: i32,
     transform: wl_output::Transform,
@@ -300,6 +302,7 @@ fn display(o: &Output) -> Option<Display> {
         ),
         scale,
         primary: false,
+        refresh_hz: crate::whole_hz(f64::from(o.refresh_mhz) / 1000.0),
     })
 }
 
@@ -322,6 +325,7 @@ impl State {
             xdg,
             name: format!("output-{global}"),
             mode: None,
+            refresh_mhz: 0,
             position: (0, 0),
             integer_scale: 1,
             transform: wl_output::Transform::Normal,
@@ -391,10 +395,11 @@ impl Dispatch<wl_output::WlOutput, u32> for State {
                 flags,
                 width,
                 height,
-                ..
+                refresh,
             } => {
                 if matches!(flags, WEnum::Value(f) if f.contains(wl_output::Mode::Current)) {
                     o.mode = Some((width, height));
+                    o.refresh_mhz = refresh;
                 }
             }
             wl_output::Event::Scale { factor } => o.integer_scale = factor,

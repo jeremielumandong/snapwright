@@ -102,6 +102,14 @@ pub struct Display {
     pub scale: f32,
     /// Whether this is the primary display.
     pub primary: bool,
+    /// Refresh rate in whole hertz (60, 120, 144), when the OS reports one.
+    pub refresh_hz: Option<u32>,
+}
+
+/// A refresh rate in hertz as whole hertz, or `None` for nonsense (0, or "default").
+#[cfg_attr(not(any(target_os = "macos", target_os = "linux")), allow(dead_code))]
+pub(crate) fn whole_hz(hz: f64) -> Option<u32> {
+    (hz.is_finite() && hz >= 2.0).then(|| hz.round() as u32)
 }
 
 /// A top-level window on screen, for snapping a selection to it.

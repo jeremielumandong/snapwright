@@ -276,6 +276,23 @@ fn bitrate_scales_with_pixels_and_quality() {
     assert_eq!(Options::new(Format::Mp4).fps, 60);
 }
 
+#[test]
+fn display_fps_follows_the_refresh_rate() {
+    let mut d = Display {
+        id: 0,
+        name: "gaming".into(),
+        bounds: Rect::new(0, 0, 2560, 1440),
+        scale: 1.0,
+        primary: true,
+        refresh_hz: Some(144),
+    };
+    assert_eq!(display_fps(&d), 144);
+    d.refresh_hz = Some(500);
+    assert_eq!(display_fps(&d), MAX_FPS);
+    d.refresh_hz = None;
+    assert_eq!(display_fps(&d), 60);
+}
+
 /// A 440 Hz tone at 44.1 kHz mono, pushed in 10 ms pieces like a device would.
 struct Tone;
 

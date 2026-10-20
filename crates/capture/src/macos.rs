@@ -12,7 +12,9 @@ use block2::RcBlock;
 use objc2::AllocAnyThread;
 use objc2::rc::Retained;
 use objc2_core_foundation::CFRetained;
-use objc2_core_graphics::{CGDataProvider, CGImage, CGMainDisplayID};
+use objc2_core_graphics::{
+    CGDataProvider, CGDisplayCopyDisplayMode, CGDisplayMode, CGImage, CGMainDisplayID,
+};
 use objc2_foundation::{NSArray, NSError};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCDisplay, SCRunningApplication, SCScreenshotManager, SCShareableContent,
@@ -261,6 +263,8 @@ fn target(display: &SCDisplay, exclude: &NSArray<SCRunningApplication>, main: u3
             ),
             scale,
             primary: id == main,
+            refresh_hz: CGDisplayCopyDisplayMode(id)
+                .and_then(|mode| crate::whole_hz(CGDisplayMode::refresh_rate(Some(&mode)))),
         },
         filter,
         pixel_width,

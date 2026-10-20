@@ -687,6 +687,7 @@ mod tests {
             bounds: Rect::new(1920, 0, 2560, 1440),
             scale: 1.0,
             primary: false,
+            refresh_hz: None,
         };
         let frame = Frame {
             display_id: 1,

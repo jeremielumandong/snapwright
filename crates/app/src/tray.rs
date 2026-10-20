@@ -17,7 +17,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 use crate::hotkey;
 use crate::omarchy;
-use crate::recording::{self, Prefs};
+use crate::recording::{self, FrameRate, Prefs};
 use crate::theme::Choice;
 
 /// What the user picked from the tray menu.
@@ -44,7 +44,7 @@ pub enum RecordingChoice {
     SystemAudio,
     /// Toggles recording the microphone.
     Microphone,
-    Fps(u32),
+    Fps(FrameRate),
     Quality(Quality),
 }
 
@@ -52,7 +52,7 @@ pub enum RecordingChoice {
 struct RecordingItems {
     system: CheckMenuItem,
     microphone: CheckMenuItem,
-    fps: Vec<(u32, CheckMenuItem)>,
+    fps: Vec<(FrameRate, CheckMenuItem)>,
     quality: Vec<(Quality, CheckMenuItem)>,
 }
 
@@ -246,9 +246,12 @@ pub fn create(
         fps: recording::FPS_CHOICES
             .into_iter()
             .map(|fps| {
-                let id = format!("{ID_FPS_PREFIX}{fps}");
-                let item =
-                    CheckMenuItem::with_id(id, format!("{fps} fps"), true, fps == prefs.fps, None);
+                let id = format!("{ID_FPS_PREFIX}{}", fps.key());
+                let text = match fps {
+                    FrameRate::Display => "Display refresh rate".to_owned(),
+                    FrameRate::Fixed(n) => format!("{n} fps"),
+                };
+                let item = CheckMenuItem::with_id(id, text, true, fps == prefs.fps, None);
                 (fps, item)
             })
             .collect(),
@@ -363,9 +366,7 @@ fn action_for(id: &MenuId) -> Option<Action> {
         ID_MICROPHONE => Some(Action::Recording(RecordingChoice::Microphone)),
         other => {
             if let Some(fps) = other.strip_prefix(ID_FPS_PREFIX) {
-                return fps
-                    .parse()
-                    .ok()
+                return FrameRate::from_key(fps)
                     .map(|fps| Action::Recording(RecordingChoice::Fps(fps)));
             }
             if let Some(q) = other.strip_prefix(ID_QUALITY_PREFIX) {
@@ -471,7 +472,13 @@ mod tests {
         );
         assert_eq!(
             action_for(&MenuId::new("record-fps-30")),
-            Some(Action::Recording(RecordingChoice::Fps(30)))
+            Some(Action::Recording(RecordingChoice::Fps(FrameRate::Fixed(
+                30
+            ))))
+        );
+        assert_eq!(
+            action_for(&MenuId::new("record-fps-display")),
+            Some(Action::Recording(RecordingChoice::Fps(FrameRate::Display)))
         );
         assert_eq!(
             action_for(&MenuId::new("record-quality-maximum")),

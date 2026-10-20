@@ -376,6 +376,11 @@ From the "Omarchy theme implementation" design handoff.
 - A source that cannot start (no device, permission refused, no Pulse server) is logged and
   left out; the recording goes on. The app's entitlements now include
   `com.apple.security.device.audio-input`, which the hardened runtime needs for the mic.
-- MP4s default to 60 fps at High quality (0.15 bit per pixel per frame, H.264 High
-  profile; 19 Mbit/s for 1080p60). Standard keeps the old 0.1, Maximum is 0.3; caps are 50,
+- MP4s default to the recorded display's refresh rate (`Display::refresh_hz`: Core
+  Graphics display mode, `EnumDisplaySettingsW`, the RandR CRTC mode, the wl_output mode;
+  60 when unknown), up to 240 fps; the tray also offers fixed 60 and 30. On macOS the
+  per-frame `SCScreenshotManager` grab (~15 ms) holds real rates near 60 until recording
+  moves to a running `SCStream`; the recorder drops frames rather than time.
+- MP4s default to High quality (0.15 bit per pixel per frame, H.264 High
+  profile; 19 Mbit/s for 1080p60, 45 for 1440p144). Standard keeps the old 0.1, Maximum is 0.3; caps are 50,
   100 and 160 Mbit/s. Linux maps them to x264 CRF 20, 17 and 14.
