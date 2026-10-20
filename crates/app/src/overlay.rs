@@ -2,7 +2,8 @@
 //! frame. Hover highlights a window, a click takes it, a drag selects a region; see
 //! [`crate::selection`] for the whole interaction. A loupe beside the pointer shows the pixels
 //! under it and their colour; `C` copies that colour as hex, `T` the text in the selection (or
-//! the hovered window). Esc cancels. In record mode the selection is the area to record.
+//! the hovered window). Esc cancels. In record mode the selection is the area to record, and
+//! for a video `A` and `M` switch the system's sound and the microphone on or off.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -212,6 +213,19 @@ impl Overlay {
             "t" if !mods.control && !mods.platform && !matches!(self.mode, Mode::Record(_)) => {
                 self.copy_text(window, cx)
             }
+            "a" | "m"
+                if !mods.control
+                    && !mods.platform
+                    && self.mode == Mode::Record(snapwright_record::Format::Mp4) =>
+            {
+                let choice = if key == "a" {
+                    crate::tray::RecordingChoice::SystemAudio
+                } else {
+                    crate::tray::RecordingChoice::Microphone
+                };
+                crate::recording::choose(choice, cx);
+                cx.notify();
+            }
             _ => {}
         }
     }
@@ -346,7 +360,7 @@ impl Overlay {
 
     /// Keys for the current step, centred at the bottom of the display (at the top when a
     /// selection reaches down there).
-    fn hints(&self, y1: Pixels) -> Div {
+    fn hints(&self, y1: Pixels, prefs: crate::recording::Prefs) -> Div {
         let bar = div()
             .h(px(HINTS_H))
             .flex()
@@ -388,6 +402,21 @@ impl Overlay {
                     )),
             )
             .child(theme::hud_hint(&["shift"], "Adjust"))
+            .when(
+                self.mode == Mode::Record(snapwright_record::Format::Mp4),
+                |bar| {
+                    let state =
+                        |on: bool, yes: &'static str, no: &'static str| if on { yes } else { no };
+                    bar.child(theme::hud_hint(
+                        &["A"],
+                        state(prefs.audio.system, "System audio on", "System audio off"),
+                    ))
+                    .child(theme::hud_hint(
+                        &["M"],
+                        state(prefs.audio.microphone, "Mic on", "Mic off"),
+                    ))
+                },
+            )
             .child(theme::hud_hint(&["escape"], "Cancel"))
         } else {
             bar.child("Click a window or drag a region")
@@ -510,7 +539,7 @@ impl Render for Overlay {
                     .child(div().size_full().border(px(1.5)).border_color(border)),
             )
             .child(self.size_label(region, x0, y0, y1))
-            .child(self.hints(y1));
+            .child(self.hints(y1, crate::recording::prefs(cx)));
         if let Some(at) = self.selector.cursor()
             && window.is_window_hovered()
         {

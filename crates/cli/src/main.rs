@@ -49,9 +49,18 @@ enum Command {
         /// Seconds to record; until Enter is pressed when omitted.
         #[arg(long)]
         seconds: Option<f64>,
-        /// Frames per second (default 30 for MP4, 15 for GIF).
+        /// Frames per second, up to 60 (default 60 for MP4, 15 for GIF).
         #[arg(long)]
         fps: Option<u32>,
+        /// MP4 bit rate: standard, high or maximum.
+        #[arg(long, default_value = "high", value_parser = parse_quality)]
+        quality: snapwright_record::Quality,
+        /// Record what the computer plays into the MP4.
+        #[arg(long)]
+        system_audio: bool,
+        /// Record the default microphone into the MP4.
+        #[arg(long)]
+        mic: bool,
         /// Output file; `.mp4` or `.gif` picks the format.
         #[arg(short, long, default_value = "recording.mp4")]
         output: PathBuf,
@@ -82,10 +91,24 @@ fn main() -> Result<()> {
             region,
             seconds,
             fps,
+            quality,
+            system_audio,
+            mic,
             output,
-        } => record(display, region, seconds, fps, output),
+        } => {
+            let audio = snapwright_record::Audio {
+                system: system_audio,
+                microphone: mic,
+            };
+            record(display, region, seconds, fps, quality, audio, output)
+        }
         Command::Bench { runs } => bench(runs),
     }
+}
+
+fn parse_quality(s: &str) -> Result<snapwright_record::Quality, String> {
+    snapwright_record::Quality::from_key(s)
+        .ok_or_else(|| "expected standard, high or maximum".to_owned())
 }
 
 fn record(
@@ -93,6 +116,8 @@ fn record(
     region: Option<Rect>,
     seconds: Option<f64>,
     fps: Option<u32>,
+    quality: snapwright_record::Quality,
+    audio: snapwright_record::Audio,
     output: PathBuf,
 ) -> Result<()> {
     use snapwright_record::{DisplaySource, Format, Options, Recorder};
@@ -109,6 +134,11 @@ fn record(
     let mut options = Options::new(format);
     if let Some(fps) = fps {
         options.fps = fps;
+    }
+    options.quality = quality;
+    options.audio = audio;
+    if format == Format::Gif && audio.any() {
+        eprintln!("GIFs have no sound; recording without it");
     }
     let source = DisplaySource::new(
         std::sync::Arc::new(std::sync::Mutex::new(capturer)),
@@ -137,6 +167,12 @@ fn record(
         summary.frames,
         summary.dropped
     );
+    for problem in &summary.audio_problems {
+        eprintln!("recorded without {problem}");
+    }
+    if summary.audio {
+        println!("with sound");
+    }
     if let Some(why) = summary.interrupted {
         bail!("recording stopped early: {why}");
     }

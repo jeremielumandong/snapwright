@@ -140,6 +140,11 @@ site/                           marketing site (static HTML, deployed by .github
 - Recording: MP4 on Linux needs `ffmpeg` on PATH (`SNAPWRIGHT_FFMPEG` overrides); its tests
   skip without it. Encoders live on their own thread for their whole life (COM and
   AVFoundation objects never cross threads). H.264 wants even sizes; the recorder rounds down.
+- Recording sound: `snapwright_record::audio` mixes sources on the recorder's clock; tests
+  feed a synthetic `AudioSource` through `Recorder::start_with_audio`, never a device. On
+  macOS the mic needs the `audio-input` entitlement and `NSMicrophoneUsageDescription`,
+  system audio `NSAudioCaptureUsageDescription` and macOS 14.6+. On Linux sound comes from
+  `ffmpeg -f pulse` and is muxed in after the video (a second, copy-only ffmpeg run).
 - Recording: the record overlay is the screenshot overlay in `Mode::Record`; the recorder
   starts `toast::SETTLE` after the overlays close so they are not in the first frame.
 - Xvfb has no window manager: keyboard focus follows the pointer, which is fine for the

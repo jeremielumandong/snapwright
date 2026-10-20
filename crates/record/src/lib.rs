@@ -9,8 +9,13 @@
 //! * GIF: a pure Rust encoder on every platform. Only the part of the screen that changed is
 //!   written per frame, so a mostly still screen gives a small file.
 //!
+//! MP4s can carry sound ([`Audio`]): what the computer plays, the microphone, or both mixed
+//! into one AAC track (see [`audio`]).
+//!
 //! Timestamps are wall-clock time since the start, minus time spent paused.
 
+pub mod audio;
+mod audio_device;
 mod encoder;
 #[cfg(any(target_os = "windows", test))]
 mod faststart;
@@ -27,13 +32,15 @@ mod windows;
 mod yuv;
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::{self, SyncSender, TrySendError};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::mpsc::{self, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use snapwright_capture::{CaptureError, Capturer, Display, Frame, Rect};
+
+pub use audio::{Audio, AudioFeed, AudioSource};
 
 /// Errors from recording.
 #[derive(Debug, thiserror::Error)]
@@ -89,11 +96,53 @@ impl Format {
         }
     }
 
-    /// A sensible frame rate: smooth video, and a GIF rate that keeps files small.
+    /// A sensible frame rate: smooth video (games and scrolling included), and a GIF rate
+    /// that keeps files small.
     pub fn default_fps(self) -> u32 {
         match self {
-            Self::Mp4 => 30,
+            Self::Mp4 => 60,
             Self::Gif => 15,
+        }
+    }
+}
+
+/// How much detail an MP4 keeps, as a bit rate for its size and frame rate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Quality {
+    /// About 0.1 bit per pixel per frame: crisp text, small files (12 Mbit/s for 1080p at
+    /// 60 fps).
+    Standard,
+    /// About 0.15: fast motion and games stay sharp (19 Mbit/s for 1080p at 60 fps).
+    #[default]
+    High,
+    /// About 0.3: close to the screen itself, for editing later (37 Mbit/s for 1080p60).
+    Maximum,
+}
+
+impl Quality {
+    pub const ALL: [Self; 3] = [Self::Standard, Self::High, Self::Maximum];
+
+    /// The name in settings files and on the command line.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::High => "high",
+            Self::Maximum => "maximum",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|q| q.key().eq_ignore_ascii_case(key))
+    }
+
+    /// The name in menus.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Standard => "Standard",
+            Self::High => "High",
+            Self::Maximum => "Maximum",
         }
     }
 }
@@ -104,16 +153,22 @@ pub struct Options {
     pub format: Format,
     /// Frames per second to capture (clamped to 1..=60).
     pub fps: u32,
+    /// MP4 bit rate (GIFs ignore it).
+    pub quality: Quality,
+    /// Sound to record with an MP4 (GIFs have none).
+    pub audio: Audio,
     /// GIFs wider than this are scaled down by a whole factor (0 keeps the full size).
     pub gif_max_width: u32,
 }
 
 impl Options {
-    /// Defaults for a format.
+    /// Defaults for a format: 60 fps MP4 at high quality without sound, 15 fps GIF.
     pub fn new(format: Format) -> Self {
         Self {
             format,
             fps: format.default_fps(),
+            quality: Quality::default(),
+            audio: Audio::default(),
             gif_max_width: 1280,
         }
     }
@@ -193,6 +248,11 @@ pub struct Summary {
     /// Why the recording ended early, if the source failed partway (the file still holds
     /// everything before that).
     pub interrupted: Option<String>,
+    /// Whether the file has a sound track.
+    pub audio: bool,
+    /// Sound sources that could not start, such as a microphone the OS refused; the
+    /// recording went on without them.
+    pub audio_problems: Vec<String>,
 }
 
 /// State the controlling thread and the capture thread share.
@@ -212,14 +272,35 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// Starts recording into `path` (replaced if it exists). Returns once the first frame is
-    /// captured and the encoder is open, so a failure there is reported here; blocks for
-    /// that long, so call it off the UI thread.
+    /// Starts recording into `path` (replaced if it exists), with the sound devices
+    /// `options.audio` names. Returns once the first frame is captured and the encoder is
+    /// open, so a failure there is reported here; blocks for that long, so call it off the
+    /// UI thread. A sound device that cannot start is left out (see
+    /// [`Summary::audio_problems`]).
     pub fn start(
         source: impl FrameSource,
         options: Options,
         path: impl Into<PathBuf>,
     ) -> Result<Self> {
+        let audio = match options.format {
+            Format::Mp4 => audio::device_sources(options.audio),
+            Format::Gif => Vec::new(),
+        };
+        Self::start_with_audio(source, audio, options, path)
+    }
+
+    /// [`Recorder::start`] with these sound sources instead of the devices in
+    /// `options.audio`. GIFs ignore them.
+    pub fn start_with_audio(
+        source: impl FrameSource,
+        audio: Vec<Box<dyn AudioSource>>,
+        options: Options,
+        path: impl Into<PathBuf>,
+    ) -> Result<Self> {
+        let audio = match options.format {
+            Format::Mp4 => audio,
+            Format::Gif => Vec::new(),
+        };
         let path = path.into();
         let shared = Arc::new(Shared::default());
         let (ready_tx, ready_rx) = mpsc::sync_channel(1);
@@ -228,7 +309,7 @@ impl Recorder {
             let out = path.clone();
             std::thread::Builder::new()
                 .name("snapwright-record".into())
-                .spawn(move || record(source, options, out, shared, ready_tx))
+                .spawn(move || record(source, audio, options, out, shared, ready_tx))
                 .map_err(|source| RecordError::Io {
                     path: path.clone(),
                     source,
@@ -306,9 +387,22 @@ fn encoded_size(format: Format, width: u32, height: u32) -> (u32, u32) {
     }
 }
 
-/// The capture thread: paces grabs, timestamps them, and feeds the encoder thread.
+/// What the capture thread hands the encoder thread.
+enum Item {
+    Video(Frame, Duration),
+    /// Interleaved stereo at 48 kHz, starting at this time.
+    Audio(Vec<f32>, Duration),
+}
+
+/// Video frames waiting for the encoder; more are dropped rather than queued, so a slow
+/// encode costs frames, not time. Sound is never dropped.
+const VIDEO_QUEUE: usize = 3;
+
+/// The capture thread: paces grabs, timestamps them, mixes the sound and feeds the encoder
+/// thread.
 fn record(
     mut source: impl FrameSource,
+    audio_sources: Vec<Box<dyn AudioSource>>,
     options: Options,
     path: PathBuf,
     shared: Arc<Shared>,
@@ -329,14 +423,29 @@ fn record(
         let _ = ready.send(Err(RecordError::EmptyRegion(r)));
         return Err(RecordError::Panicked);
     }
-    let (frames_tx, frames_rx) = mpsc::sync_channel::<(Frame, Duration)>(3);
+    // Sound devices start before the encoder opens, so it knows whether there is a track.
+    let mut mixer = audio::Mixer::default();
+    let (sound, audio_problems) = audio::start(audio_sources, &mut mixer);
+    for problem in &audio_problems {
+        tracing::warn!(problem = %problem, "recording without this sound");
+    }
+    let has_audio = sound.is_some();
+    let stop_sound = |sound: Option<audio::Started>| {
+        if let Some(s) = sound {
+            s.stop();
+        }
+    };
+
+    let (items_tx, items_rx) = mpsc::channel::<Item>();
+    let queued = Arc::new(AtomicUsize::new(0));
     let (open_tx, open_rx) = mpsc::sync_channel(1);
     let encoder = {
         let out = path.clone();
+        let queued = queued.clone();
         std::thread::Builder::new()
             .name("snapwright-encode".into())
             .spawn(move || -> Result<(u32, u32)> {
-                let mut enc = match encoder::open(options, &out, width, height, fps) {
+                let mut enc = match encoder::open(options, &out, width, height, fps, has_audio) {
                     Ok(enc) => {
                         let _ = open_tx.send(Ok(()));
                         enc
@@ -349,12 +458,20 @@ fn record(
                 };
                 let mut end = Duration::ZERO;
                 let mut failed = None;
-                for (frame, at) in frames_rx {
-                    end = at;
+                for item in items_rx {
+                    let pushed = match item {
+                        Item::Video(frame, at) => {
+                            end = end.max(at);
+                            let pushed = enc.push(frame, at);
+                            queued.fetch_sub(1, Ordering::Relaxed);
+                            pushed
+                        }
+                        Item::Audio(samples, at) => enc.push_audio(&samples, at),
+                    };
                     if failed.is_none()
-                        && let Err(e) = enc.push(frame, at)
+                        && let Err(e) = pushed
                     {
-                        // Keep draining so the capture thread never blocks on a dead encoder.
+                        // Keep draining so the capture thread never waits on a dead encoder.
                         failed = Some(e);
                     }
                 }
@@ -368,23 +485,33 @@ fn record(
             .map_err(|source| RecordError::Io {
                 path: path.clone(),
                 source,
-            })?
+            })
+    };
+    let encoder = match encoder {
+        Ok(e) => e,
+        Err(e) => {
+            stop_sound(sound);
+            return Err(e);
+        }
     };
     // The clock starts once the encoder is open, just before `start` returns: setup
     // time (spawning ffmpeg, creating the file) is not part of the recording.
     let start = match open_rx.recv() {
         Ok(Ok(())) => {
             let start = Instant::now();
+            mixer.discard();
             let _ = ready.send(Ok(()));
             start
         }
         Ok(Err(e)) => {
-            drop(frames_tx);
+            drop(items_tx);
             let _ = encoder.join();
+            stop_sound(sound);
             let _ = ready.send(Err(e));
             return Err(RecordError::Panicked);
         }
         Err(_) => {
+            stop_sound(sound);
             let _ = ready.send(Err(RecordError::Panicked));
             return Err(RecordError::Panicked);
         }
@@ -399,6 +526,12 @@ fn record(
             None
         }
     };
+    let send_audio = |chunk: Option<(Vec<f32>, Duration)>| -> bool {
+        match chunk {
+            Some((samples, at)) => items_tx.send(Item::Audio(samples, at)).is_ok(),
+            None => true,
+        }
+    };
     let poster = first.clone();
     let interval = Duration::from_secs(1) / fps;
     let mut frames = 0u64;
@@ -411,11 +544,18 @@ fn record(
     let mut at = Duration::ZERO;
     loop {
         if let Some(frame) = pending.take() {
-            match frames_tx.try_send((frame, at)) {
-                Ok(()) => frames += 1,
-                Err(TrySendError::Full(_)) => dropped += 1,
-                Err(TrySendError::Disconnected(_)) => break,
+            if queued.load(Ordering::Relaxed) >= VIDEO_QUEUE {
+                dropped += 1;
+            } else {
+                queued.fetch_add(1, Ordering::Relaxed);
+                if items_tx.send(Item::Video(frame, at)).is_err() {
+                    break;
+                }
+                frames += 1;
             }
+        }
+        if has_audio && !send_audio(mixer.take_live(at)) {
+            break;
         }
         if shared.stop.load(Ordering::Relaxed) {
             break;
@@ -431,7 +571,12 @@ fn record(
         }
         let now = Instant::now();
         if shared.paused.load(Ordering::Relaxed) {
+            if paused_since.is_none() && has_audio {
+                // Everything heard up to the pause goes in; nothing heard during it.
+                send_audio(mixer.take(at + interval, Duration::ZERO));
+            }
             paused_since.get_or_insert(now);
+            mixer.discard();
             continue;
         }
         if let Some(since) = paused_since.take() {
@@ -454,12 +599,18 @@ fn record(
         }
     }
     let duration = at + interval;
-    drop(frames_tx);
+    if has_audio {
+        // The sound up to the end of the last frame; sources that fell behind are silent.
+        send_audio(mixer.take(duration, Duration::ZERO));
+    }
+    stop_sound(sound);
+    drop(items_tx);
     let (width, height) = encoder.join().map_err(|_| RecordError::Panicked)??;
     tracing::info!(
         path = %path.display(),
         frames,
         dropped,
+        audio = has_audio,
         seconds = duration.as_secs_f64(),
         "recording finished"
     );
@@ -473,6 +624,8 @@ fn record(
         dropped,
         poster,
         interrupted,
+        audio: has_audio,
+        audio_problems,
     })
 }
 
