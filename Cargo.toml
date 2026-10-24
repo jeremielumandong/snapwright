@@ -60,9 +60,9 @@ gif = "0.14"
 # WASAPI (loopback on the output device). Linux reads PulseAudio through ffmpeg.
 cpal = { version = "0.18.2", default-features = false }
 
-# UI: gpui-kit is the facade over gpui (gpui-pre =0.3.8) + gpui-component 0.7.1, kept in
+# UI: gpui-kit is the facade over gpui (gpui-pre =0.3.9) + gpui-component 0.7.3, kept in
 # lockstep, as in Switchyard. `image` must match the version gpui links (its `Frame` type).
-gpui-kit = "=0.7.1"
+gpui-kit = "=0.7.3"
 image = { version = "0.25", default-features = false }
 tray-icon = { version = "0.26.1", default-features = false, features = ["ksni"] }
 global-hotkey = "0.8"
@@ -115,8 +115,8 @@ codegen-units = 1
 # gpui-fast (Retained Mode rendering) in place of GPUI Kit's upstream `gpui-pre`, pinned to
 # the same revision Switchyard ships. See docs/DECISIONS.md.
 [patch.crates-io]
-gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "598306fcbf77bff0f764b5a178a447344e72e132" }
-gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "598306fcbf77bff0f764b5a178a447344e72e132" }
-gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "598306fcbf77bff0f764b5a178a447344e72e132" }
-gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "598306fcbf77bff0f764b5a178a447344e72e132" }
-gpui-pre-web = { git = "https://github.com/longbridge/gpui-fast", rev = "598306fcbf77bff0f764b5a178a447344e72e132" }
+gpui-pre = { git = "https://github.com/longbridge/gpui-fast", rev = "124f79b0f14c688ae87877e370c015a9dc9d7ce5" }
+gpui-pre-platform = { git = "https://github.com/longbridge/gpui-fast", rev = "124f79b0f14c688ae87877e370c015a9dc9d7ce5" }
+gpui-pre-macros = { git = "https://github.com/longbridge/gpui-fast", rev = "124f79b0f14c688ae87877e370c015a9dc9d7ce5" }
+gpui-pre-sum-tree = { git = "https://github.com/longbridge/gpui-fast", rev = "124f79b0f14c688ae87877e370c015a9dc9d7ce5" }
+gpui-pre-web = { git = "https://github.com/longbridge/gpui-fast", rev = "124f79b0f14c688ae87877e370c015a9dc9d7ce5" }

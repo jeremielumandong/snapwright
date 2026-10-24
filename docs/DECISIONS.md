@@ -384,3 +384,18 @@ From the "Omarchy theme implementation" design handoff.
 - MP4s default to High quality (0.15 bit per pixel per frame, H.264 High
   profile; 19 Mbit/s for 1080p60, 45 for 1440p144). Standard keeps the old 0.1, Maximum is 0.3; caps are 50,
   100 and 160 Mbit/s. Linux maps them to x264 CRF 20, 17 and 14.
+
+## 2026-10-24: gpui-fast at 124f79b (on-demand Windows frames)
+
+- gpui-fast PR #84 (merged as `124f79b`) stops the Windows backend invalidating every window
+  at the display refresh rate while idle: a window's VSync worker parks until input,
+  presentation or a paint asks for a frame. That is the idle CPU 0% target on Windows.
+- No crates.io release has it yet (gpui-fast v0.1.10 is `b836dd9`), so the
+  `[patch.crates-io]` git pin moves from `598306f` to `124f79b`. Its compat crates now carry
+  gpui-pre 0.3.9, which GPUI Kit pins exactly from 0.7.3, so gpui-kit goes 0.7.1 -> 0.7.3
+  (gpui-component 0.7.3). Not 0.8.0: that is a minor bump with its own API changes; take it
+  separately. The pin also brings Taffy 0.14 and wgpu 30 (git, with the Vulkan
+  surface-teardown fix).
+- The Touch Bar fix (zed#65186) is still not in gpui-fast at `124f79b`
+  (`gpui_macos` still uses `SubclassingAdapter`), so macOS keeps
+  `Application::new_inaccessible`.
